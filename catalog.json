@@ -1,0 +1,20 @@
+[
+ {"id":"rice","name":"Rice","hi":"chawal","aliases":["chawal","rice","चावल"],"unit":"kg","price":60},
+ {"id":"atta","name":"Wheat flour","hi":"atta","aliases":["atta","flour","आटा"],"unit":"kg","price":45},
+ {"id":"sugar","name":"Sugar","hi":"cheeni","aliases":["cheeni","chini","sugar","चीनी"],"unit":"kg","price":48},
+ {"id":"salt","name":"Salt","hi":"namak","aliases":["namak","salt","नमक"],"unit":"kg","price":22},
+ {"id":"toor","name":"Toor dal","hi":"toor dal","aliases":["toor dal","arhar dal","toor","arhar"],"unit":"kg","price":150},
+ {"id":"moong","name":"Moong dal","hi":"moong dal","aliases":["moong dal","moong"],"unit":"kg","price":130},
+ {"id":"chana","name":"Chana dal","hi":"chana dal","aliases":["chana dal","chana"],"unit":"kg","price":95},
+ {"id":"oil","name":"Cooking oil","hi":"tel","aliases":["tel","oil","तेल"],"unit":"l","price":140},
+ {"id":"milk","name":"Milk","hi":"doodh","aliases":["doodh","dudh","milk","दूध"],"unit":"l","price":56},
+ {"id":"tea","name":"Tea leaves","hi":"chai patti","aliases":["chai patti","tea","chai"],"unit":"packet","price":130},
+ {"id":"maggi","name":"Maggi","hi":"Maggi","aliases":["maggi","noodles"],"unit":"packet","price":14},
+ {"id":"biscuit","name":"Biscuits","hi":"biscuit","aliases":["biscuit","biscuits","parle"],"unit":"packet","price":10},
+ {"id":"soap","name":"Soap","hi":"sabun","aliases":["sabun","soap","साबुन"],"unit":"piece","price":38},
+ {"id":"egg","name":"Eggs","hi":"anda","aliases":["anda","ande","egg","eggs","अंडा"],"unit":"dozen","price":84},
+ {"id":"onion","name":"Onion","hi":"pyaaz","aliases":["pyaaz","pyaz","onion","प्याज"],"unit":"kg","price":40},
+ {"id":"potato","name":"Potato","hi":"aloo","aliases":["aloo","alu","potato","आलू"],"unit":"kg","price":30},
+ {"id":"tomato","name":"Tomato","hi":"tamatar","aliases":["tamatar","tomato","टमाटर"],"unit":"kg","price":50},
+ {"id":"bread","name":"Bread","hi":"bread","aliases":["bread","pav"],"unit":"packet","price":45}
+]

@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Bill</title>
+<link href="https://fonts.googleapis.com/css2?family=Hind:wght@400;600;700&family=Courier+Prime:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#10312f;--ink:#14211f;--paper:#fbfaf6;--mute:#6d7a77;--gold:#f2b705;--line:#d9d6cc;--bad:#b3261e;color-scheme:light}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:#eef3f1;font:16px/1.5 Hind,system-ui,sans-serif;min-height:100vh}
+main{max-width:980px;margin:0 auto;padding:28px 18px;display:grid;gap:28px;grid-template-columns:1fr 1fr}
+@media(max-width:760px){main{grid-template-columns:1fr}}
+h1{font-size:2rem;margin:0 0 4px;font-weight:700}
+.sub{color:#a9c1bc;margin:0 0 22px;max-width:36ch}
+.mic{width:116px;height:116px;border-radius:50%;border:0;background:var(--gold);color:var(--ink);font:700 1rem Hind;cursor:pointer;display:block;margin:6px 0 10px}
+.mic[aria-pressed=true]{background:#e5484d;color:#fff;animation:pulse 1.2s infinite}
+@keyframes pulse{50%{box-shadow:0 0 0 16px rgba(229,72,77,.18)}}
+@media(prefers-reduced-motion:reduce){.mic[aria-pressed=true]{animation:none}}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #fff;outline-offset:2px}
+#status{min-height:1.6em;color:#cfe3de}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}
+label{display:grid;gap:3px;font-size:.85rem;color:#a9c1bc}
+select,input[type=text]{font:inherit;padding:8px 10px;border-radius:6px;border:1px solid #3d6561;background:#0b2523;color:#eef3f1}
+.type{display:flex;gap:8px}.type input{flex:1}
+.btn{font:600 .95rem Hind;padding:8px 14px;border-radius:6px;border:1px solid #3d6561;background:transparent;color:#eef3f1;cursor:pointer}
+.btn.pri{background:#eef3f1;color:var(--ink);border-color:#eef3f1}
+.heard{margin-top:18px;color:#a9c1bc;font-size:.92rem}.heard b{color:#eef3f1;font-weight:600}
+.receipt{background:var(--paper);color:var(--ink);padding:22px 20px;font-family:"Courier Prime",monospace;align-self:start;
+ clip-path:polygon(0 0,100% 0,100% calc(100% - 10px),96% 100%,92% calc(100% - 10px),88% 100%,84% calc(100% - 10px),80% 100%,76% calc(100% - 10px),72% 100%,68% calc(100% - 10px),64% 100%,60% calc(100% - 10px),56% 100%,52% calc(100% - 10px),48% 100%,44% calc(100% - 10px),40% 100%,36% calc(100% - 10px),32% 100%,28% calc(100% - 10px),24% 100%,20% calc(100% - 10px),16% 100%,12% calc(100% - 10px),8% 100%,4% calc(100% - 10px),0 100%);padding-bottom:34px}
+.receipt h2{margin:0 0 2px;font-size:1.1rem}.receipt small{color:var(--mute)}
+table{width:100%;border-collapse:collapse;margin:14px 0}
+td{padding:6px 2px;border-bottom:1px dashed var(--line);vertical-align:top}
+td.n{text-align:right;white-space:nowrap}
+.q{width:3.6em;font:inherit;border:1px solid var(--line);background:#fff;padding:2px 4px;text-align:right}
+.x{border:0;background:none;color:var(--bad);cursor:pointer;font-size:1.1rem}
+.note{color:var(--bad);font-size:.78rem}
+.total{display:flex;justify-content:space-between;font-weight:700;font-size:1.25rem}
+.empty{color:var(--mute);padding:16px 0}
+.receipt .btn{color:var(--ink);border-color:var(--ink);margin-top:14px;margin-right:6px}
+.receipt .btn.pri{background:var(--ink);color:#fff}
+</style>
+</head>
+<body>
+<main>
+ <section>
+  <h1>Voice Bill</h1>
+  <p class="sub">Tap the mic and say the order, like “do kilo chawal, ek litre tel, teen Maggi”.</p>
+  <button class="mic" id="mic" aria-pressed="false">Tap to speak</button>
+  <div id="status" role="status" aria-live="polite"></div>
+  <div class="row">
+   <label>Customer speaks<select id="lang"><option value="en-IN">Hinglish / English</option><option value="hi-IN">Hindi</option></select></label>
+   <label>Bill is read in<select id="style"><option value="hinglish">Hinglish</option><option value="english">English</option></select></label>
+  </div>
+  <div class="type"><input type="text" id="typed" placeholder="Or type the order" aria-label="Type the order"><button class="btn" id="go">Make bill</button></div>
+  <p class="heard" id="heard"></p>
+ </section>
+ <section class="receipt" aria-label="Bill">
+  <h2>Kirana bill</h2><small id="date"></small>
+  <div id="bill"><p class="empty">No items yet. Speak an order to start the bill.</p></div>
+  <div id="acts" hidden>
+   <button class="btn pri" id="read">Read bill aloud</button><button class="btn" id="copy">Copy for WhatsApp</button>
+  </div>
+ </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let bill = {items: [], total: 0}, rec, chunks = [], timer;
+$("date").textContent = new Date().toLocaleString("en-IN", {dateStyle: "medium", timeStyle: "short"});
+const say = (t, bad) => { $("status").textContent = t; $("status").style.color = bad ? "#ffb4ab" : ""; };
+const inr = n => "₹" + n.toLocaleString("en-IN", {minimumFractionDigits: n % 1 ? 2 : 0});
+
+// Gnani STT wants wav/mp3/etc, not browser webm: decode and re-encode as 16 kHz mono WAV.
+async function toWav(blob) {
+  const buf = await new AudioContext().decodeAudioData(await blob.arrayBuffer());
+  const off = new OfflineAudioContext(1, Math.ceil(buf.duration * 16000), 16000);
+  const src = off.createBufferSource(); src.buffer = buf; src.connect(off.destination); src.start();
+  const pcm = (await off.startRendering()).getChannelData(0);
+  const out = new DataView(new ArrayBuffer(44 + pcm.length * 2));
+  const w = (o, s) => [...s].forEach((c, i) => out.setUint8(o + i, c.charCodeAt(0)));
+  w(0, "RIFF"); out.setUint32(4, 36 + pcm.length * 2, true); w(8, "WAVEfmt "); out.setUint32(16, 16, true);
+  out.setUint16(20, 1, true); out.setUint16(22, 1, true); out.setUint32(24, 16000, true);
+  out.setUint32(28, 32000, true); out.setUint16(32, 2, true); out.setUint16(34, 16, true);
+  w(36, "data"); out.setUint32(40, pcm.length * 2, true);
+  pcm.forEach((s, i) => out.setInt16(44 + i * 2, Math.max(-1, Math.min(1, s)) * 0x7fff, true));
+  return new Blob([out], {type: "audio/wav"});
+}
+
+async function send(form) {
+  say("Making the bill…");
+  form.append("lang", $("lang").value);
+  try {
+    const r = await fetch("/api/order", {method: "POST", body: form});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || "Something went wrong");
+    bill = d; render();
+    $("heard").innerHTML = `Heard: <b>${d.transcript}</b>` + (d.unmatched?.length ? `<br>Not in price list: ${d.unmatched.join(", ")}` : "");
+    say(d.items.length ? "Bill ready. Check the quantities, then read it aloud." : "No items found. Try again.", !d.items.length);
+  } catch (e) { say(e.message, true); }
+}
+
+$("mic").onclick = async () => {
+  if (rec && rec.state === "recording") return rec.stop();
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+    rec = new MediaRecorder(stream); chunks = [];
+    rec.ondataavailable = e => chunks.push(e.data);
+    rec.onstop = async () => {
+      clearTimeout(timer); stream.getTracks().forEach(t => t.stop());
+      $("mic").setAttribute("aria-pressed", "false"); $("mic").textContent = "Tap to speak";
+      const f = new FormData(); f.append("audio", await toWav(new Blob(chunks)), "order.wav"); send(f);
+    };
+    rec.start(); timer = setTimeout(() => rec.stop(), 30000);
+    $("mic").setAttribute("aria-pressed", "true"); $("mic").textContent = "Tap to stop"; say("Listening…");
+  } catch { say("Microphone blocked. Allow mic access, or type the order.", true); }
+};
+$("go").onclick = () => { const t = $("typed").value.trim(); if (t) { const f = new FormData(); f.append("text", t); send(f); } };
+$("typed").onkeydown = e => { if (e.key === "Enter") $("go").click(); };
+
+function render() {
+  $("acts").hidden = !bill.items.length;
+  if (!bill.items.length) { $("bill").innerHTML = '<p class="empty">No items yet. Speak an order to start the bill.</p>'; return; }
+  $("bill").innerHTML = `<table>${bill.items.map((i, k) => `<tr><td>${i.name}<br><small>${inr(i.unit_price)}/${i.unit}</small>
+    ${i.note ? `<div class="note">${i.note}</div>` : ""}</td>
+    <td class="n"><input class="q" type="number" min="0" step="0.25" value="${i.qty}" data-k="${k}" aria-label="Quantity of ${i.name}"> ${i.unit}</td>
+    <td class="n">${inr(i.line_total)}</td><td><button class="x" data-r="${k}" aria-label="Remove ${i.name}">×</button></td></tr>`).join("")}</table>
+    <div class="total"><span>Total</span><span>${inr(bill.total)}</span></div>`;
+}
+$("bill").onchange = e => { if (e.target.dataset.k) { bill.items[e.target.dataset.k].qty = parseFloat(e.target.value) || 0; recalc(); } };
+$("bill").onclick = e => { if (e.target.dataset.r) { bill.items.splice(e.target.dataset.r, 1); recalc(); } };
+async function recalc() {
+  const rows = bill.items.filter(i => i.qty > 0).map(i => ({id: i.id, qty: i.qty}));
+  bill = await (await fetch("/api/bill", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({items: rows})})).json();
+  render();
+}
+$("read").onclick = async () => {
+  say("Preparing voice…");
+  const r = await fetch("/api/speak", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({items: bill.items.map(i => ({id: i.id, qty: i.qty})), style: $("style").value})});
+  if (!r.ok) return say((await r.json()).detail || "Voice failed", true);
+  const a = new Audio(URL.createObjectURL(await r.blob())); a.onended = () => say(""); say("Reading the bill…"); a.play();
+};
+$("copy").onclick = async () => {
+  const t = ["*Bill*", ...bill.items.map(i => `${i.name} ${i.qty} ${i.unit} = ${inr(i.line_total)}`), `*Total: ${inr(bill.total)}*`].join("\n");
+  await navigator.clipboard.writeText(t); say("Copied. Paste it into WhatsApp.");
+};
+</script>
+</body>
+</html>
