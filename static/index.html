@@ -39,6 +39,11 @@ td.n{text-align:right;white-space:nowrap}
 .empty{color:var(--mute);padding:16px 0}
 .receipt .btn{color:var(--ink);border-color:var(--ink);margin-top:14px;margin-right:6px}
 .receipt .btn.pri{background:var(--ink);color:#fff}
+.flags{margin:0 0 10px;padding:0;list-style:none;font-size:.85rem;color:var(--bad)}
+.ask{border:2px solid var(--ink);padding:12px;margin-top:12px;text-align:center}
+.ask p{margin:0 0 8px;font-weight:700}
+details{margin-top:22px;color:#a9c1bc;font-size:.9rem}summary{cursor:pointer;color:#eef3f1}
+details h3{font-size:.9rem;margin:12px 0 4px;color:#eef3f1}details ul{margin:0;padding-left:18px}.low{color:var(--gold)}
 </style>
 </head>
 <body>
@@ -54,10 +59,14 @@ td.n{text-align:right;white-space:nowrap}
   </div>
   <div class="type"><input type="text" id="typed" placeholder="Or type the order" aria-label="Type the order"><button class="btn" id="go">Make bill</button></div>
   <p class="heard" id="heard"></p>
+  <details id="db"><summary>Shop data (stock and recent orders)</summary><div id="dbview"></div></details>
  </section>
  <section class="receipt" aria-label="Bill">
   <h2>Kirana bill</h2><small id="date"></small>
   <div id="bill"><p class="empty">No items yet. Speak an order to start the bill.</p></div>
+  <div id="flags"></div>
+  <div class="ask" id="ask" hidden><p id="askq">Is this order correct?</p>
+   <button class="btn pri" id="yes">Yes, correct</button><button class="btn" id="no">No, repeat</button></div>
   <div id="acts" hidden>
    <button class="btn pri" id="read">Read bill aloud</button><button class="btn" id="copy">Copy for WhatsApp</button>
   </div>
@@ -65,7 +74,8 @@ td.n{text-align:right;white-space:nowrap}
 </main>
 <script>
 const $ = id => document.getElementById(id);
-let bill = {items: [], total: 0}, rec, chunks = [], timer;
+const JSONH = {"Content-Type": "application/json"};
+let bill = {items: [], total: 0, unavailable: [], limited: [], unmatched: []}, transcript = "", pending = false, activeRec = null;
 $("date").textContent = new Date().toLocaleString("en-IN", {dateStyle: "medium", timeStyle: "short"});
 const say = (t, bad) => { $("status").textContent = t; $("status").style.color = bad ? "#ffb4ab" : ""; };
 const inr = n => "₹" + n.toLocaleString("en-IN", {minimumFractionDigits: n % 1 ? 2 : 0});
@@ -85,40 +95,80 @@ async function toWav(blob) {
   pcm.forEach((s, i) => out.setInt16(44 + i * 2, Math.max(-1, Math.min(1, s)) * 0x7fff, true));
   return new Blob([out], {type: "audio/wav"});
 }
+async function capture(ms) {  // records until stopped or ms elapsed, resolves to a WAV blob
+  const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+  const r = new MediaRecorder(stream), ch = [];
+  r.ondataavailable = e => ch.push(e.data); activeRec = r;
+  const done = new Promise(res => r.onstop = () => { stream.getTracks().forEach(t => t.stop()); activeRec = null; res(new Blob(ch)); });
+  r.start(); setTimeout(() => r.state === "recording" && r.stop(), ms);
+  return toWav(await done);
+}
+function micError(e) {
+  console.error(e);
+  const why = {NotAllowedError: "permission denied (check the lock icon)", NotFoundError: "no microphone found",
+    NotReadableError: "another app is using the mic", TypeError: "mic unavailable on this page"}[e.name] || e.message;
+  say(`Mic error: ${e.name}, ${why}. You can still type the order.`, true);
+}
+const playBlob = b => new Promise(res => { const a = new Audio(URL.createObjectURL(b)); a.onended = a.onerror = res; a.play().catch(res); });
+const rows = () => bill.items.filter(i => i.qty > 0).map(i => ({id: i.id, qty: i.qty}));
+
+async function speak(mode) {
+  say("Speaking…");
+  const r = await fetch("/api/speak", {method: "POST", headers: JSONH, body: JSON.stringify({items: rows(), style: $("style").value,
+    mode, unavailable: bill.unavailable, limited: bill.limited, unmatched: bill.unmatched})});
+  if (!r.ok) { say((await r.json()).detail || "Voice failed", true); return false; }
+  await playBlob(await r.blob()); return true;
+}
 
 async function send(form) {
-  say("Making the bill…");
-  form.append("lang", $("lang").value);
+  say("Making the bill…"); form.append("lang", $("lang").value);
   try {
-    const r = await fetch("/api/order", {method: "POST", body: form});
-    const d = await r.json();
+    const r = await fetch("/api/order", {method: "POST", body: form}), d = await r.json();
     if (!r.ok) throw new Error(d.detail || "Something went wrong");
-    bill = d; render();
-    $("heard").innerHTML = `Heard: <b>${d.transcript}</b>` + (d.unmatched?.length ? `<br>Not in price list: ${d.unmatched.join(", ")}` : "");
-    say(d.items.length ? "Bill ready. Check the quantities, then read it aloud." : "No items found. Try again.", !d.items.length);
+    bill = d; transcript = d.transcript; pending = d.items.length > 0; render();
+    $("heard").textContent = "Heard: " + d.transcript;
+    if (await speak("confirm") && pending) listen();   // read back what it understood, then ask yes/no
+    else if (!pending) say("Tap the mic and say the order again.");
   } catch (e) { say(e.message, true); }
 }
 
-$("mic").onclick = async () => {
-  if (rec && rec.state === "recording") return rec.stop();
+async function listen() {
+  say("Listening… say haan or nahi (or tap a button)");
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({audio: true});
-    rec = new MediaRecorder(stream); chunks = [];
-    rec.ondataavailable = e => chunks.push(e.data);
-    rec.onstop = async () => {
-      clearTimeout(timer); stream.getTracks().forEach(t => t.stop());
-      $("mic").setAttribute("aria-pressed", "false"); $("mic").textContent = "Tap to speak";
-      const f = new FormData(); f.append("audio", await toWav(new Blob(chunks)), "order.wav"); send(f);
-    };
-    rec.start(); timer = setTimeout(() => rec.stop(), 30000);
-    $("mic").setAttribute("aria-pressed", "true"); $("mic").textContent = "Tap to stop"; say("Listening…");
-  } catch { say("Microphone blocked. Allow mic access, or type the order.", true); }
+    const f = new FormData(); f.append("audio", await capture(4000), "a.wav"); f.append("lang", $("lang").value);
+    const r = await fetch("/api/yesno", {method: "POST", body: f}), d = await r.json();
+    if (!pending) return;
+    if (d.answer === "yes") confirmOrder(); else if (d.answer === "no") retry();
+    else say("Didn't catch that. Tap Yes or No.", true);
+  } catch (e) { e.name ? micError(e) : say("Tap Yes or No.", true); }
+}
+async function retry() { pending = false; render(); await speak("retry"); say("Tap the mic and say the order again."); }
+async function confirmOrder() {
+  pending = false;
+  const r = await fetch("/api/confirm", {method: "POST", headers: JSONH, body: JSON.stringify({items: rows(), transcript})});
+  const d = await r.json(); if (!r.ok) return say(d.detail, true);
+  bill = {...bill, ...d}; render(); loadDb(); await speak("bill"); say(`Order #${d.order_id} saved.`);
+}
+$("yes").onclick = () => { if (activeRec) activeRec.stop(); if (pending) confirmOrder(); };
+$("no").onclick = () => { if (activeRec) activeRec.stop(); retry(); };
+
+$("mic").onclick = async () => {
+  if (activeRec) return activeRec.stop();
+  $("mic").setAttribute("aria-pressed", "true"); $("mic").textContent = "Tap to stop"; say("Listening…");
+  try {
+    const wav = await capture(30000);
+    $("mic").setAttribute("aria-pressed", "false"); $("mic").textContent = "Tap to speak";
+    const f = new FormData(); f.append("audio", wav, "order.wav"); send(f);
+  } catch (e) { $("mic").setAttribute("aria-pressed", "false"); $("mic").textContent = "Tap to speak"; micError(e); }
 };
 $("go").onclick = () => { const t = $("typed").value.trim(); if (t) { const f = new FormData(); f.append("text", t); send(f); } };
 $("typed").onkeydown = e => { if (e.key === "Enter") $("go").click(); };
 
 function render() {
-  $("acts").hidden = !bill.items.length;
+  $("acts").hidden = pending || !bill.items.length; $("ask").hidden = !pending;
+  const flags = [...bill.unavailable.map(u => `${u.name} is not available`),
+    ...bill.limited.map(l => `Only ${l.left} ${l.unit} of ${l.name} left`), ...bill.unmatched.map(u => `"${u}" is not in our list`)];
+  $("flags").innerHTML = flags.length ? `<ul class="flags">${flags.map(f => `<li>${f}</li>`).join("")}</ul>` : "";
   if (!bill.items.length) { $("bill").innerHTML = '<p class="empty">No items yet. Speak an order to start the bill.</p>'; return; }
   $("bill").innerHTML = `<table>${bill.items.map((i, k) => `<tr><td>${i.name}<br><small>${inr(i.unit_price)}/${i.unit}</small>
     ${i.note ? `<div class="note">${i.note}</div>` : ""}</td>
@@ -129,21 +179,20 @@ function render() {
 $("bill").onchange = e => { if (e.target.dataset.k) { bill.items[e.target.dataset.k].qty = parseFloat(e.target.value) || 0; recalc(); } };
 $("bill").onclick = e => { if (e.target.dataset.r) { bill.items.splice(e.target.dataset.r, 1); recalc(); } };
 async function recalc() {
-  const rows = bill.items.filter(i => i.qty > 0).map(i => ({id: i.id, qty: i.qty}));
-  bill = await (await fetch("/api/bill", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({items: rows})})).json();
-  render();
+  const d = await (await fetch("/api/bill", {method: "POST", headers: JSONH, body: JSON.stringify({items: rows()})})).json();
+  bill = {...bill, items: d.items, total: d.total}; render();
 }
-$("read").onclick = async () => {
-  say("Preparing voice…");
-  const r = await fetch("/api/speak", {method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({items: bill.items.map(i => ({id: i.id, qty: i.qty})), style: $("style").value})});
-  if (!r.ok) return say((await r.json()).detail || "Voice failed", true);
-  const a = new Audio(URL.createObjectURL(await r.blob())); a.onended = () => say(""); say("Reading the bill…"); a.play();
-};
+$("read").onclick = () => speak("bill").then(() => say(""));
 $("copy").onclick = async () => {
   const t = ["*Bill*", ...bill.items.map(i => `${i.name} ${i.qty} ${i.unit} = ${inr(i.line_total)}`), `*Total: ${inr(bill.total)}*`].join("\n");
   await navigator.clipboard.writeText(t); say("Copied. Paste it into WhatsApp.");
 };
+async function loadDb() {
+  const [cat, ord] = await Promise.all([fetch("/api/catalog").then(r => r.json()), fetch("/api/orders").then(r => r.json())]);
+  $("dbview").innerHTML = `<h3>Stock</h3><ul>${cat.map(c => `<li class="${c.stock < 5 ? "low" : ""}">${c.name}: ${c.stock} ${c.unit}${c.stock <= 0 ? " (out)" : ""}</li>`).join("")}</ul>
+    <h3>Recent orders</h3>${ord.length ? `<ul>${ord.map(o => `<li>#${o.id} ${inr(o.total)}: ${o.items}</li>`).join("")}</ul>` : "<p>None yet.</p>"}`;
+}
+loadDb();
 </script>
 </body>
 </html>

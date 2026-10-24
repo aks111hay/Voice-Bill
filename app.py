@@ -1,5 +1,6 @@
 """Voice Bill: speak a Hinglish order -> Gnani Prisma STT -> parse -> bill -> Gnani Timbre TTS."""
-import json, os, re
+import json, os, re, sqlite3
+from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
@@ -11,8 +12,30 @@ from pydantic import BaseModel
 
 load_dotenv()
 BASE = Path(__file__).parent
-CATALOG = json.loads((BASE / "catalog.json").read_text(encoding="utf-8"))
-BY_ID = {c["id"]: c for c in CATALOG}
+DB_PATH = os.getenv("DB_PATH", str(BASE / "bill.db"))
+SEED_STOCK = {"bread": 0, "egg": 3, "maggi": 8}  # bread out, eggs/maggi low: handy for demos
+CATALOG, BY_ID = [], {}
+
+def db():
+    c = sqlite3.connect(DB_PATH); c.row_factory = sqlite3.Row; return c
+
+def load():
+    global CATALOG, BY_ID
+    with db() as c: rows = c.execute("SELECT * FROM items").fetchall()
+    CATALOG = [{**dict(r), "aliases": json.loads(r["aliases"])} for r in rows]
+    BY_ID = {c["id"]: c for c in CATALOG}
+
+def init_db():
+    with db() as c:
+        c.executescript("""CREATE TABLE IF NOT EXISTS items(id TEXT PRIMARY KEY,name,hi,aliases,unit,price REAL,stock REAL);
+        CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT,created TEXT,transcript TEXT,total REAL,items TEXT);""")
+        if not c.execute("SELECT 1 FROM items").fetchone():
+            seed = json.loads((BASE / "catalog.json").read_text(encoding="utf-8"))
+            c.executemany("INSERT INTO items VALUES(?,?,?,?,?,?,?)", [(x["id"], x["name"], x["hi"],
+                json.dumps(x["aliases"], ensure_ascii=False), x["unit"], x["price"], SEED_STOCK.get(x["id"], 50)) for x in seed])
+    load()
+
+init_db()
 GNANI = "https://api.vachana.ai"
 E = os.getenv
 app = FastAPI(title="Voice Bill")
@@ -132,7 +155,7 @@ def convert(qty, spoken, item_unit):
     return float(qty), f"heard '{spoken}', item is sold per {item_unit} - check"
 
 def build_bill(rows):
-    merged, items, total = {}, [], Decimal(0)
+    merged, items, total, unavailable, limited = {}, [], Decimal(0), [], []
     for r in rows:
         c = BY_ID.get(r.get("id"))
         if not c: continue
@@ -140,12 +163,17 @@ def build_bill(rows):
         m = merged.setdefault(c["id"], {"qty": 0.0, "note": ""})
         m["qty"] += qty; m["note"] = m["note"] or note
     for cid, m in merged.items():
-        c, qty = BY_ID[cid], round(m["qty"], 3)
+        c, qty, note = BY_ID[cid], round(m["qty"], 3), m["note"]
+        if c["stock"] <= 0:
+            unavailable.append({"name": c["name"], "hi": c["hi"]}); continue
+        if qty > c["stock"]:
+            limited.append({"name": c["name"], "hi": c["hi"], "left": c["stock"], "unit": c["unit"]})
+            qty, note = c["stock"], f"only {c['stock']:g} {c['unit']} in stock"
         line = (Decimal(str(qty)) * Decimal(str(c["price"]))).quantize(Decimal("0.01"), ROUND_HALF_UP)
         total += line
         items.append({"id": cid, "name": c["name"], "hi": c["hi"], "qty": qty, "unit": c["unit"],
-                      "unit_price": c["price"], "line_total": float(line), "note": m["note"]})
-    return {"items": items, "total": float(total)}
+                      "unit_price": c["price"], "line_total": float(line), "note": note})
+    return {"items": items, "total": float(total), "unavailable": unavailable, "limited": limited}
 
 # ---------- Speech text (numbers as words, as Gnani recommends) ----------
 ONES = "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen".split()
@@ -166,12 +194,31 @@ def say_qty(q):
 
 SAY_UNIT = {"kg": "kilo", "l": "litre", "packet": "packet", "piece": "piece", "dozen": "dozen"}
 
-def speech(bill, style):
+def speech(bill, style, mode="bill", unmatched=()):
     en = style == "english"
-    if not bill["items"]: return "I did not catch any items. Please try again." if en else "Koi item samajh nahi aaya. Dobara boliye."
-    lines = ", ".join(f"{say_qty(i['qty'])} {SAY_UNIT[i['unit']]} {i['name'] if en else i['hi']}" for i in bill["items"])
+    if mode == "retry": return "Okay, please say the order again." if en else "Theek hai, dobara order boliye."
+    nm = lambda x: x["name"] if en else x["hi"]
+    lines = ", ".join(f"{say_qty(i['qty'])} {SAY_UNIT[i['unit']]} {nm(i)}" for i in bill["items"])
     rupees, paise = divmod(round(bill["total"] * 100), 100)
     amt = words(rupees) + (f" rupees and {words(paise)} paise" if paise else " rupees")
+    if mode == "confirm":
+        p = []
+        if bill["items"]: p.append(("I heard: " if en else "Maine suna: ") + lines + ".")
+        if bill["unavailable"]:
+            n = " and ".join(nm(u) for u in bill["unavailable"])
+            p.append(f"Sorry, {n} is not available right now." if en else f"Sorry, {n} abhi available nahi hai.")
+        for l in bill["limited"]:
+            left = f"{say_qty(l['left'])} {SAY_UNIT[l['unit']]}"
+            p.append(f"Only {left} of {nm(l)} is left." if en else f"{nm(l)} sirf {left} bacha hai.")
+        if unmatched:
+            u = ", ".join(unmatched)
+            p.append(f"We do not have {u}." if en else f"{u} hamare paas nahi hai.")
+        if not bill["items"]:
+            p.append("Please say your order again." if en else "Kripya order dobara boliye.")
+        else:
+            p.append("Is this correct? Please say yes or no." if en else "Kya yeh sahi hai? Haan ya nahi boliye.")
+        return " ".join(p)
+    if not bill["items"]: return "No items in the bill." if en else "Bill mein koi item nahi hai."
     return (f"Your bill is ready. {lines}. Total {amt}. Thank you!" if en
             else f"Aapka bill taiyaar hai. {lines}. Total {amt}. Dhanyavaad!")
 
@@ -179,6 +226,17 @@ def speech(bill, style):
 class Req(BaseModel):
     items: list[dict]
     style: str = "hinglish"
+    mode: str = "bill"  # bill | confirm | retry
+    unavailable: list[dict] = []
+    limited: list[dict] = []
+    unmatched: list[str] = []
+
+class ConfirmReq(BaseModel):
+    items: list[dict]
+    transcript: str = ""
+
+YES = {"haan", "han", "ha", "haa", "yes", "yeah", "yep", "theek", "thik", "sahi", "correct", "ok", "okay", "bilkul", "हाँ", "हां", "ठीक", "सही", "बिल्कुल"}
+NO = {"nahi", "nahin", "nahi", "no", "nope", "galat", "wrong", "cancel", "नहीं", "नही", "गलत"}
 
 @app.post("/api/order")
 async def order(lang: str = Form("en-IN"), text: str = Form(""), audio: UploadFile | None = File(None)):
@@ -194,12 +252,37 @@ async def order(lang: str = Form("en-IN"), text: str = Form(""), audio: UploadFi
     if rows is None: rows, unmatched = rule_parse(transcript)
     return {"transcript": transcript, "parser": parser, "unmatched": unmatched, **build_bill(rows)}
 
+@app.post("/api/yesno")
+async def yesno(lang: str = Form("en-IN"), audio: UploadFile = File(...)):
+    t = await stt(await audio.read(), lang)
+    toks = set(TOK.findall(t.lower()))
+    return {"transcript": t, "answer": "no" if toks & NO else "yes" if toks & YES else "unclear"}
+
 @app.post("/api/bill")
 def recalc(req: Req): return build_bill(req.items)
 
 @app.post("/api/speak")
 async def speak(req: Req):
-    return Response(await tts(speech(build_bill(req.items), req.style), req.style), media_type="audio/wav")
+    bill = {**build_bill(req.items), "unavailable": req.unavailable, "limited": req.limited}
+    return Response(await tts(speech(bill, req.style, req.mode, req.unmatched), req.style), media_type="audio/wav")
+
+@app.post("/api/confirm")
+def confirm(req: ConfirmReq):
+    bill = build_bill(req.items)
+    if not bill["items"]: raise HTTPException(400, "Nothing to save")
+    with db() as c:
+        cur = c.execute("INSERT INTO orders(created,transcript,total,items) VALUES(?,?,?,?)",
+                        (datetime.now().isoformat(timespec="seconds"), req.transcript, bill["total"], json.dumps(bill["items"])))
+        for i in bill["items"]:
+            c.execute("UPDATE items SET stock = MAX(stock - ?, 0) WHERE id = ?", (i["qty"], i["id"]))
+    load()
+    return {"order_id": cur.lastrowid, **bill}
+
+@app.get("/api/orders")
+def orders():
+    with db() as c: rows = c.execute("SELECT * FROM orders ORDER BY id DESC LIMIT 8").fetchall()
+    return [{"id": r["id"], "created": r["created"], "total": r["total"],
+             "items": ", ".join(i["name"] for i in json.loads(r["items"]))} for r in rows]
 
 @app.get("/api/catalog")
 def catalog(): return CATALOG
